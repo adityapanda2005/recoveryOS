@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: recoveros
+          POSTGRES_PASSWORD: recoveros_dev_pw
+          POSTGRES_DB: recoveros
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U recoveros -d recoveros"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg2://recoveros:recoveros_dev_pw@localhost:5432/recoveros
+      AI_PROVIDER: mock
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: apps/api
+        run: pip install -r requirements.txt
+
+      - name: Run migrations
+        working-directory: apps/api
+        run: alembic upgrade head
+
+      - name: Seed deterministic data
+        working-directory: apps/api
+        run: python -m app.db.seed
+
+      - name: Run tests
+        working-directory: apps/api
+        run: python -m pytest -v
