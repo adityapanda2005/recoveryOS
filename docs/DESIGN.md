@@ -125,7 +125,92 @@ timestamps and reasons, verified live.
   invalid transition returns 422 → duplicate webhook returns 409 →
   transition history retrievable.
 
-## Phase 3 — AI layer
+## Phase 3 — AI layer (complete)
+
+### Provider abstraction (`app/ai/provider.py`)
+
+`AIProvider` is the only interface the rest of the system depends on.
+`AIContext` is the explicit, flat input surface — every signal the AI is
+allowed to reason over is visible in one dataclass, not implicitly derived
+from an ORM object. Two implementations:
+
+- **`MockAIProvider`** (`app/ai/mock_provider.py`) — the default. Zero cost,
+  zero network dependency, and genuinely deterministic (same input always
+  produces the same output — verified by test), which is required for the
+  1,000-event batch evaluation in Phase 5 to be reproducible. It encodes
+  the same reasoning heuristics as the product spec's two worked examples,
+  not just random/fake output:
+  - Transient failure + strong customer history (≥0.6 success rate) →
+    `RETRY_PAYMENT` with confidence ≥0.65 — verified against the spec's
+    literal "₹4,999, 7 successful payments" example.
+  - Retries exhausted (`previous_attempts >= merchant_max_retry_attempts`)
+    → `STOP` with a required, non-empty `stop_reason` — verified against
+    the spec's "4 failed attempts, retry limit exhausted" example.
+  - Also has explicit rules for permanent failure reasons (card
+    expired/mandate revoked → payment link or stop depending on history)
+    and low-signal cases (→ reminder), so all 8 `RecommendedAction` values
+    are reachable, not just retry/stop.
+  - Supports deterministic failure injection (`force_timeout`,
+    `force_malformed`) used by both the test suite and, later, the
+    Failure Lab — so "AI times out" and "AI returns malformed output" are
+    real, triggerable code paths, not just described in a document.
+
+- **`AnthropicProvider`** (`app/ai/anthropic_provider.py`) — real Claude API
+  calls using forced tool-use (`tool_choice: {"type": "tool", ...}`) so the
+  model is structurally constrained to the decision shape, rather than
+  parsing free-text JSON out of prose. Still re-validated through
+  `AIDecisionOutput` after the call — a well-formed tool-use block is not
+  automatically trusted. Inactive unless `AI_PROVIDER=anthropic` and
+  `ANTHROPIC_API_KEY` are set in `.env`; `MockAIProvider` remains the
+  default so the whole system runs with zero API cost out of the box.
+
+### Structured output contract (`app/ai/schemas.py`)
+
+`AIDecisionOutput` is a Pydantic model matching the spec's JSON contract
+exactly (diagnosis, evidence, recoverability_score, recommended_action,
+confidence, expected_recovery_minor, risk_level,
+recommended_delay_seconds, customer_message_intent, stop_reason), plus one
+business-rule validator beyond basic type-checking: **a `STOP`
+recommendation without a `stop_reason` is rejected at construction time** —
+an unexplained stop is exactly the "trust the model blindly" failure mode
+the product spec warns against, so it's structurally impossible, not just
+discouraged by prompt wording.
+
+### Diagnosis service (`app/ai/diagnosis_service.py`)
+
+The only entry point the rest of the app uses. Owns:
+- Provider selection (reads `AI_PROVIDER` from settings — nothing else in
+  the codebase hardcodes which provider is active)
+- One bounded retry on provider failure (not unlimited — the failure
+  matrix requires bounded retries everywhere, including here)
+- Fallback to a conservative default (`ESCALATE_TO_HUMAN`, confidence
+  `0.0`, so it never falsely claims certainty) if both attempts fail or
+  return output that fails schema validation
+- Persisting every attempt — successful or fallback — to `ai_decisions`,
+  so a fallback shows up in the audit trail as a fallback, not silently
+  disappears
+
+Confidence-threshold policy (is 0.85 confidence good enough to act on
+unsupervised) deliberately stays out of this service and lives only in the
+Phase 2 policy engine — this keeps "did we get a trustworthy decision at
+all" and "is it good enough to act on" as two separately testable concerns.
+
+### Verified
+
+- 37/37 tests passing (13 added for Phase 3): mock-provider determinism,
+  both product-spec worked examples reproduced exactly, schema validation
+  (confidence range, stop-reason requirement, non-negative recovery
+  amount), and both real injected-failure fallback paths (forced timeout,
+  forced malformed output) — not just described, actually triggered and
+  asserted on.
+- Live end-to-end via running API + Postgres: created a risk event,
+  confirmed `/diagnose` correctly rejects a workflow not yet in
+  `ENRICHING` (409), advanced it, called `/diagnose` again — got back a
+  real `RETRY_PAYMENT` recommendation at 0.85 confidence reasoning
+  correctly over the seeded customer's actual 7-success/1-failure history,
+  and confirmed the workflow state advanced to `SCORING`.
+
+## Phase 4 — Action execution & failure handling
 
 _Pending._
 

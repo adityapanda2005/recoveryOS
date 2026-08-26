@@ -3,9 +3,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.db.models import RevenueRiskEvent, RecoveryWorkflow, WorkflowTransition
+from app.db.models import (
+    RevenueRiskEvent, RecoveryWorkflow, WorkflowTransition, WorkflowState,
+    Customer, Merchant, MerchantPolicy,
+)
 from app.domain.state_machine import create_workflow, transition, InvalidTransitionError
-from app.api.schemas import RiskEventCreate, RiskEventOut, WorkflowOut, TransitionOut
+from app.api.schemas import RiskEventCreate, RiskEventOut, WorkflowOut, TransitionOut, AIDecisionOut
+from app.ai.provider import AIContext
+from app.ai.diagnosis_service import diagnose_and_persist
 
 router = APIRouter()
 
@@ -92,3 +97,57 @@ def advance_workflow(workflow_id: str, to_state: str, reason: str | None = None,
         raise HTTPException(status_code=422, detail=str(e))
 
     return wf
+
+
+@router.post("/workflows/{workflow_id}/diagnose", response_model=AIDecisionOut)
+def diagnose_workflow(workflow_id: str, db: Session = Depends(get_db)):
+    """
+    Run AI diagnosis for a workflow currently in ENRICHING, and advance it
+    to DIAGNOSING then SCORING on success (or FAILED if even the fallback
+    path can't be persisted — which should not happen in practice, since
+    diagnose_and_persist always returns a decision, real or fallback).
+
+    Requires the workflow to be in ENRICHING so this can't be called twice
+    on the same workflow at the wrong point in its lifecycle — the state
+    machine, not this endpoint, is the source of truth for what's legal.
+    """
+    wf = db.query(RecoveryWorkflow).filter_by(id=workflow_id).first()
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if wf.current_state != WorkflowState.ENRICHING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Workflow must be in ENRICHING to diagnose; currently {wf.current_state.value}.",
+        )
+
+    risk_event = db.query(RevenueRiskEvent).filter_by(id=wf.risk_event_id).first()
+    customer = db.query(Customer).filter_by(id=risk_event.customer_id).first()
+    policy = db.query(MerchantPolicy).filter_by(merchant_id=wf.merchant_id).first()
+
+    context = AIContext(
+        risk_event_type=risk_event.event_type.value,
+        failure_reason=risk_event.failure_reason.value,
+        amount_minor=risk_event.amount_minor,
+        currency=risk_event.currency,
+        previous_attempts=risk_event.previous_attempts,
+        customer_historical_successful_payments=customer.historical_successful_payments,
+        customer_historical_failed_payments=customer.historical_failed_payments,
+        customer_is_opted_out=customer.is_opted_out,
+        merchant_max_retry_attempts=policy.max_retry_attempts,
+        merchant_allows_incentives=policy.allow_incentives,
+    )
+
+    try:
+        wf = transition(db, wf, WorkflowState.DIAGNOSING, reason="AI diagnosis started")
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    decision = diagnose_and_persist(db, workflow_id=wf.id, context=context)
+
+    # Diagnosis always produces a decision (real or fallback) -> SCORING.
+    # A hard AI-layer crash that somehow escapes diagnose_and_persist would
+    # leave the workflow correctly stuck in DIAGNOSING rather than silently
+    # advancing past a failure we don't actually understand.
+    transition(db, wf, WorkflowState.SCORING, reason="AI decision recorded")
+
+    return decision

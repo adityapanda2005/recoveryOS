@@ -33,8 +33,11 @@ verified against a live Postgres database before moving to the next.
       Docker Compose, health/readiness endpoints — all verified against a
       running database.
 - [ ] Phase 2 — Core engine: workflow state machine + policy engine + tests
-- [ ] Phase 3 — AI layer: provider abstraction (Anthropic + Mock), structured
-      output validation, fallback handling
+- [x] **Phase 3 — AI layer**: provider abstraction (Anthropic + Mock),
+      structured output contract with business-rule validation, bounded
+      retry + fallback, both product-spec worked examples reproduced
+      exactly — all verified with real injected failures (forced timeout,
+      forced malformed output) and a live end-to-end API call.
 - [ ] Phase 4 — Action execution + failure simulator + idempotency
 - [ ] Phase 5 — Evaluation: 1,000-event synthetic batch, baseline vs RecoverOS
 - [ ] Phase 6 — Dashboard: Overview, Risk Queue, Workflow Detail, Failure Lab

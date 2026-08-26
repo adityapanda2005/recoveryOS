@@ -50,3 +50,24 @@ class TransitionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AIDecisionOut(BaseModel):
+    id: str
+    provider: str
+    model_version: str
+    diagnosis: str
+    evidence: list[str]
+    recoverability_score: float
+    recommended_action: str
+    confidence: float
+    expected_recovery_minor: int
+    risk_level: str
+    recommended_delay_seconds: int
+    stop_reason: str | None
+    was_fallback: bool
+    validation_passed: bool
+    latency_ms: int | None
+
+    class Config:
+        from_attributes = True
