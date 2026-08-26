@@ -9,8 +9,10 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from app.db.session import SessionLocal
+from app.api.routes import router as domain_router
 
 app = FastAPI(title="RecoverOS API", version="0.1.0")
+app.include_router(domain_router, prefix="/api/v1", tags=["recovery"])
 
 
 @app.get("/health")
