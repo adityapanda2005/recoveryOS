@@ -94,9 +94,68 @@ def workflow(db, risk_event, merchant_with_policy):
     merchant, _ = merchant_with_policy
     wf = create_workflow(db, risk_event_id=risk_event.id, merchant_id=merchant.id)
     yield wf
-    # workflow_transitions cascade via FK but we have no ON DELETE CASCADE,
-    # so clean up children explicitly to avoid FK violations on teardown.
-    from app.db.models import WorkflowTransition
+    # workflow_transitions and audit_events both FK to recovery_workflows
+    # with no ON DELETE CASCADE, so clean up children explicitly in FK-safe
+    # order to avoid violations on teardown.
+    from app.db.models import WorkflowTransition, AuditEvent
+    db.query(AuditEvent).filter_by(workflow_id=wf.id).delete()
     db.query(WorkflowTransition).filter_by(workflow_id=wf.id).delete()
     db.query(type(wf)).filter_by(id=wf.id).delete()
+    db.commit()
+
+
+@pytest.fixture
+def ai_decision_allow(db, workflow):
+    """A persisted AI decision recommending RETRY_PAYMENT at high confidence
+    -- the precondition for a policy decision + action in most Phase 4 tests."""
+    from app.db.models import AIDecision, RecommendedAction, RiskLevel
+
+    decision = AIDecision(
+        workflow_id=workflow.id,
+        provider="mock",
+        model_version="mock-heuristic-v1",
+        prompt_version="mock-v1",
+        diagnosis="Strong recovery signal.",
+        evidence=[],
+        recoverability_score=0.85,
+        recommended_action=RecommendedAction.RETRY_PAYMENT,
+        confidence=0.9,
+        expected_recovery_minor=499900,
+        risk_level=RiskLevel.LOW,
+        recommended_delay_seconds=0,
+        was_fallback=False,
+        validation_passed=True,
+    )
+    db.add(decision)
+    db.commit()
+    db.refresh(decision)
+
+    yield decision
+
+    db.query(AIDecision).filter_by(id=decision.id).delete()
+    db.commit()
+
+
+@pytest.fixture
+def policy_decision_allow(db, workflow, ai_decision_allow):
+    """A persisted ALLOW policy decision -- the precondition for calling
+    execute_action, which must never be called with a BLOCK/ESCALATE
+    verdict in real code."""
+    from app.db.models import PolicyDecisionRecord, PolicyDecision, RecommendedAction
+
+    record = PolicyDecisionRecord(
+        workflow_id=workflow.id,
+        ai_decision_id=ai_decision_allow.id,
+        requested_action=RecommendedAction.RETRY_PAYMENT,
+        decision=PolicyDecision.ALLOW,
+        rule_triggered="all_checks_passed",
+        explanation="Test fixture: allowed.",
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    yield record
+
+    db.query(PolicyDecisionRecord).filter_by(id=record.id).delete()
     db.commit()

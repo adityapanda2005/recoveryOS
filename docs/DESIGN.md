@@ -210,13 +210,99 @@ all" and "is it good enough to act on" as two separately testable concerns.
   correctly over the seeded customer's actual 7-success/1-failure history,
   and confirmed the workflow state advanced to `SCORING`.
 
-## Phase 4 — Action execution & failure handling
+## Phase 4 — Action execution & failure handling (complete)
 
-_Pending._
+### Payment/recovery simulator (`app/simulation/payment_simulator.py`)
 
-## Phase 4 — Action execution & failure handling
+Stands in for Razorpay's real APIs — zero external dependency, zero
+production money movement, matching the spec's Demo Mode requirement.
+Determinism is the core design choice: outcome is derived from a stable
+hash of `(idempotency_key, seed)`, so the same inputs always produce the
+same outcome, which is what makes the Phase 5 batch evaluation
+reproducible and lets the future Failure Lab force a specific failure on
+demand (`force_outcome=...`) instead of hoping one occurs randomly.
 
-_Pending._
+**Timeout is modeled as an exception, not a return value** —
+`TimeoutSimulated` is raised, not returned as `SimulatedResult(outcome=TIMEOUT)`.
+This is deliberate: a real HTTP timeout means the caller never learns the
+outcome. Returning a normal result would silently misrepresent the actual
+failure mode the system needs to handle.
+
+### Action executor (`app/actions/executor.py`)
+
+The only code path that executes an approved action. Three properties
+enforced structurally, not just by convention:
+
+1. **Idempotency is a DB constraint, not an app-logic check.** Every
+   action gets a deterministic key
+   (`{workflow_id}:{action_type}:{attempt_number}`). A second call with
+   the same key hits `actions.idempotency_key`'s unique constraint and
+   raises `DuplicateActionError` — verified by test with a call-count
+   assertion proving the simulator itself was only invoked once, not just
+   that the DB has one row.
+2. **A timeout never triggers a blind retry.** On `TimeoutSimulated`, the
+   `Action` is marked `UNCERTAIN` and the workflow moves to
+   `PENDING_VERIFICATION`. There is no code path anywhere in the executor
+   that retries an uncertain action directly — `reconcile_action()` must
+   run first and resolve the actual external state.
+3. **Only an `ALLOW` policy verdict may reach this code.** `execute_action`
+   raises immediately if called with anything else — this is the
+   structural half of "AI proposes, policy validates, action executor
+   executes."
+
+### Full pipeline wired into the API (`app/api/routes.py`)
+
+Added `/plan`, `/execute`, and `/reconcile` to complete the loop the
+earlier phases only had pieces of:
+
+```
+DETECT → ENRICHING → DIAGNOSING → SCORING → PLANNING → POLICY_CHECK
+  → APPROVED → EXECUTING → VERIFYING → RECOVERED
+                    ↳ PENDING_VERIFICATION → (reconcile) → VERIFYING → RECOVERED / DETECTED
+  → ESCALATED / EXHAUSTED (policy engine's verdict, not a crash)
+```
+
+`/plan` fetches the latest `AIDecision`, runs it through the real Phase 2
+policy engine (not a stub), persists the verdict, and transitions the
+workflow accordingly. `/execute` calls the real action executor and
+verified the outcome. `/reconcile` is the only path out of
+`PENDING_VERIFICATION`.
+
+### Audit trail gap found and closed
+
+Auditing this phase surfaced a real gap: the `audit_events` table (defined
+in the Phase 1 schema) had zero writes anywhere in the codebase —
+`workflow_transitions`, `ai_decisions`, and `policy_decisions` all
+recorded their own domain data, but there was no unified cross-cutting
+log, and critical test #10 from the build spec ("audit events are
+created") was not actually satisfied. Added `app/core/audit.py` — a single
+`log_audit_event()` function — and wired it into workflow creation, every
+state transition, every policy verdict, and every action outcome
+(succeeded, duplicate-blocked, timed-out-to-uncertain, rate-limited,
+reconciled). Verified live: a single successful workflow run now produces
+a complete 12-row audit trail from `workflow.created` through
+`action.succeeded` to the final `RECOVERED` transition.
+
+### Verified
+
+- 57/57 tests passing (20 new): payment simulator determinism (including
+  a genuine bug fix — the original determinism test crashed rather than
+  compared when its chosen key landed in the `TIMEOUT` bucket, now fixed
+  to handle both normal and exceptional deterministic outcomes),
+  idempotency key construction, duplicate-action rejection (with a
+  call-count proof the simulator was only actually invoked once),
+  timeout → `UNCERTAIN` (not `FAILED`), reconciliation requiring
+  `UNCERTAIN` status, and 5 new audit-trail tests asserting real
+  `audit_events` rows exist for each event type.
+- Live end-to-end via running API + Postgres, two full scenarios:
+  1. **Happy path**: risk event → enrich → diagnose (0.95 confidence
+     `RETRY_PAYMENT`) → plan (policy `ALLOW`) → execute → `RECOVERED`,
+     with a complete, verified 12-row audit trail.
+  2. **Correct refusal to act**: a customer with 0 successful / 4 failed
+     payments and a permanent failure reason → diagnosis correctly
+     returns `STOP` with a real `stop_reason` → plan correctly lands on
+     `EXHAUSTED`, never `APPROVED` — proving "knowing when not to act"
+     holds end-to-end, not just inside the mock provider's unit tests.
 
 ## Phase 5 — Evaluation
 

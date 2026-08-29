@@ -38,7 +38,15 @@ verified against a live Postgres database before moving to the next.
       retry + fallback, both product-spec worked examples reproduced
       exactly — all verified with real injected failures (forced timeout,
       forced malformed output) and a live end-to-end API call.
-- [ ] Phase 4 — Action execution + failure simulator + idempotency
+- [x] **Phase 4 — Action execution & failure handling**: deterministic
+      payment simulator, idempotent action executor (DB-enforced, proven
+      with a call-count test), timeout → `PENDING_VERIFICATION` →
+      mandatory reconciliation (never a blind retry), full `/plan` →
+      `/execute` → `/reconcile` pipeline wired into the API, and a
+      cross-cutting audit trail (found and closed a real gap: the
+      `audit_events` table existed but had zero writes before this
+      phase). Verified live: a complete happy-path recovery and a
+      correct-refusal-to-act case, both through the real running API.
 - [ ] Phase 5 — Evaluation: 1,000-event synthetic batch, baseline vs RecoverOS
 - [ ] Phase 6 — Dashboard: Overview, Risk Queue, Workflow Detail, Failure Lab
 

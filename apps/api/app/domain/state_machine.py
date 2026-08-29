@@ -15,6 +15,7 @@ state graph is readable in one place and testable in isolation.
 from sqlalchemy.orm import Session
 
 from app.db.models import RecoveryWorkflow, WorkflowTransition, WorkflowState
+from app.core.audit import log_audit_event
 
 
 class InvalidTransitionError(Exception):
@@ -122,6 +123,15 @@ def transition(
         to_state=to_state,
         reason=reason,
     ))
+    log_audit_event(
+        db,
+        actor="system",
+        event_type="workflow.transitioned",
+        description=f"Workflow moved {from_state.value if from_state else 'NEW'} -> {to_state.value}"
+                    + (f": {reason}" if reason else ""),
+        workflow_id=workflow.id,
+        metadata={"from_state": from_state.value if from_state else None, "to_state": to_state.value},
+    )
 
     workflow.current_state = to_state
     workflow.is_terminal = to_state in TERMINAL_STATES
@@ -152,6 +162,14 @@ def create_workflow(db: Session, risk_event_id: str, merchant_id: str) -> Recove
         to_state=WorkflowState.DETECTED,
         reason="Workflow created from revenue risk event",
     ))
+    log_audit_event(
+        db,
+        actor="system",
+        event_type="workflow.created",
+        description=f"Workflow created for risk event {risk_event_id}",
+        workflow_id=workflow.id,
+        metadata={"risk_event_id": risk_event_id, "merchant_id": merchant_id},
+    )
     db.commit()
     db.refresh(workflow)
     return workflow
