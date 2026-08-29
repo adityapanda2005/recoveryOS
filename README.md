@@ -47,7 +47,17 @@ verified against a live Postgres database before moving to the next.
       `audit_events` table existed but had zero writes before this
       phase). Verified live: a complete happy-path recovery and a
       correct-refusal-to-act case, both through the real running API.
-- [ ] Phase 5 — Evaluation: 1,000-event synthetic batch, baseline vs RecoverOS
+- [x] **Phase 5 — Evaluation**: 1,000-event synthetic generator with real,
+      deterministic ground truth; static baseline vs RecoverOS run over
+      the identical dataset using the actual diagnosis heuristics and
+      policy engine (not a re-implementation); honest, unadjusted results
+      — RecoverOS wins clearly on false-negative rate (2.4% vs 7.2%) but
+      does *not* win on raw automated recovered revenue or
+      precision-when-acting on this dataset, both reported as-is, with
+      the escalation-queue context needed to interpret the headline
+      number correctly. Two real bugs found and fixed while building
+      this (a false-negative formula error, and a missing-context gap on
+      the headline comparison). See `docs/DESIGN.md` for full numbers.
 - [ ] Phase 6 — Dashboard: Overview, Risk Queue, Workflow Detail, Failure Lab
 
 ## Running locally
